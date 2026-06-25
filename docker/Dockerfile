@@ -5,10 +5,15 @@
 
 FROM node:20-slim AS web-builder
 
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+
 WORKDIR /app/apps/dsa-web
 
 COPY apps/dsa-web/package.json apps/dsa-web/package-lock.json ./
-RUN npm ci
+RUN npm config set registry ${NPM_REGISTRY} \
+    && npm config set fetch-timeout 600000 \
+    && npm config set fetch-retries 5 \
+    && npm ci --no-audit --fund=false
 
 COPY apps/dsa-web/ ./
 RUN npm run build
@@ -16,12 +21,21 @@ RUN npm run build
 # Pin to bookworm: wkhtmltopdf was removed from Debian testing (2025)
 FROM python:3.11-slim-bookworm
 
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_EXTRA_INDEX_URL=
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
 # 设置工作目录
 WORKDIR /app
 
 # 设置时区为上海
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Use TUNA mirror for faster and more reliable production builds in China.
+RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+    sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list 2>/dev/null; \
+    true
 
 # 安装系统依赖（wkhtmltopdf 含 wkhtmltoimage，用于 Markdown 转图片 Issue #289）
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,7 +58,13 @@ RUN groupadd -g 1000 dsa && \
 COPY requirements.txt .
 
 # 安装 Python 依赖
-RUN pip install --no-cache-dir -r requirements.txt
+# AlphaSift is installed from GitHub. In restricted production networks, pip's
+# isolated build env may fail to fetch build deps such as setuptools even though
+# the base image already ships a compatible setuptools version.
+RUN set -eux; \
+    pip_args="--index-url ${PIP_INDEX_URL} --trusted-host ${PIP_TRUSTED_HOST} --timeout 120 --retries 5"; \
+    if [ -n "${PIP_EXTRA_INDEX_URL}" ]; then pip_args="$pip_args --extra-index-url ${PIP_EXTRA_INDEX_URL}"; fi; \
+    pip install --no-cache-dir --no-build-isolation -r requirements.txt $pip_args
 
 # 复制应用代码
 COPY *.py ./
